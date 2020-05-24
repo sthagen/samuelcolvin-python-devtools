@@ -51,13 +51,15 @@ class SkipPretty(Exception):
 
 
 class PrettyFormat:
-    def __init__(self,
-                 indent_step=4,
-                 indent_char=' ',
-                 repr_strings=False,
-                 simple_cutoff=10,
-                 width=120,
-                 yield_from_generators=True):
+    def __init__(
+        self,
+        indent_step=4,
+        indent_char=' ',
+        repr_strings=False,
+        simple_cutoff=10,
+        width=120,
+        yield_from_generators=True,
+    ):
         self._indent_step = indent_step
         self._c = indent_char
         self._repr_strings = repr_strings
@@ -88,15 +90,19 @@ class PrettyFormat:
         if indent_first:
             self._stream.write(indent_current * self._c)
 
-        pretty_func = getattr(value, '__pretty__', None)
-        if pretty_func and not isinstance(value, MockCall):
-            try:
-                gen = pretty_func(fmt=fmt, skip_exc=SkipPretty)
-                self._render_pretty(gen, indent_current)
-            except SkipPretty:
-                pass
-            else:
-                return
+        try:
+            pretty_func = getattr(value, '__pretty__')
+        except AttributeError:
+            pass
+        else:
+            if hasattr(pretty_func, '__self__') and not isinstance(value, MockCall):
+                try:
+                    gen = pretty_func(fmt=fmt, skip_exc=SkipPretty)
+                    self._render_pretty(gen, indent_current)
+                except SkipPretty:
+                    pass
+                else:
+                    return
 
         value_repr = repr(value)
         if len(value_repr) <= self._simple_cutoff and not isinstance(value, Generator):
