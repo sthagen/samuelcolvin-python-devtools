@@ -1,18 +1,17 @@
-import ast
-import inspect
 import os
-import pdb
-import re
-from pathlib import Path
-from textwrap import dedent, indent
-from typing import Generator, List, Optional, Tuple
+import sys
 
-from .ansi import isatty, sformat
-from .prettier import PrettyFormat, env_true
+from .ansi import sformat
+from .prettier import PrettyFormat
 from .timer import Timer
+from .utils import env_bool, env_true, use_highlight
 
 __all__ = 'Debug', 'debug'
-CWD = Path('.').resolve()
+MYPY = False
+if MYPY:
+    import ast
+    from types import FrameType
+    from typing import Generator, List, Optional, Tuple
 
 
 pformat = PrettyFormat(
@@ -21,6 +20,10 @@ pformat = PrettyFormat(
     width=int(os.getenv('PY_DEVTOOLS_WIDTH', 120)),
     yield_from_generators=env_true('PY_DEVTOOLS_YIELD_FROM_GEN', True),
 )
+
+
+class IntrospectionError(ValueError):
+    pass
 
 
 class DebugArgument:
@@ -72,7 +75,7 @@ class DebugOutput:
     arg_class = DebugArgument
     __slots__ = 'filename', 'lineno', 'frame', 'arguments', 'warning'
 
-    def __init__(self, *, filename: str, lineno: int, frame: str, arguments: List[DebugArgument], warning=None):
+    def __init__(self, *, filename: str, lineno: int, frame: str, arguments: 'List[DebugArgument]', warning=None):
         self.filename = filename
         self.lineno = lineno
         self.frame = frame
@@ -104,92 +107,86 @@ class DebugOutput:
 
 class Debug:
     output_class = DebugOutput
-    complex_nodes = (
-        ast.Call,
-        ast.Attribute,
-        ast.Subscript,
-        ast.IfExp,
-        ast.BoolOp,
-        ast.BinOp,
-        ast.Compare,
-        ast.DictComp,
-        ast.ListComp,
-        ast.SetComp,
-        ast.GeneratorExp,
-    )
 
     def __init__(
-        self, *, warnings: Optional[bool] = None, highlight: Optional[bool] = None, frame_context_length: int = 50
+        self, *, warnings: 'Optional[bool]' = None, highlight: 'Optional[bool]' = None, frame_context_length: int = 50
     ):
-        self._show_warnings = self._env_bool(warnings, 'PY_DEVTOOLS_WARNINGS', True)
-        self._highlight = self._env_bool(highlight, 'PY_DEVTOOLS_HIGHLIGHT', None)
+        self._show_warnings = env_bool(warnings, 'PY_DEVTOOLS_WARNINGS', True)
+        self._highlight = highlight
         # 50 lines should be enough to make sure we always get the entire function definition
         self._frame_context_length = frame_context_length
 
-    @classmethod
-    def _env_bool(cls, value, env_name, env_default):
-        if value is None:
-            return env_true(env_name, env_default)
-        else:
-            return value
-
     def __call__(self, *args, file_=None, flush_=True, **kwargs) -> None:
-        d_out = self._process(args, kwargs, r'debug *\(')
-        highlight = isatty(file_) if self._highlight is None else self._highlight
-        s = d_out.str(highlight)
+        d_out = self._process(args, kwargs, 'debug')
+        s = d_out.str(use_highlight(self._highlight, file_))
         print(s, file=file_, flush=flush_)
 
     def format(self, *args, **kwargs) -> DebugOutput:
-        return self._process(args, kwargs, r'debug.format *\(')
+        return self._process(args, kwargs, 'format')
 
     def breakpoint(self):
+        import pdb
+
         pdb.Pdb(skip=['devtools.*']).set_trace()
 
     def timer(self, name=None, *, verbose=True, file=None, dp=3) -> Timer:
         return Timer(name=name, verbose=verbose, file=file, dp=dp)
 
-    def _process(self, args, kwargs, func_regex) -> DebugOutput:
-        curframe = inspect.currentframe()
+    def _process(self, args, kwargs, func_name: str) -> DebugOutput:
+        """
+        BEWARE: this must be called from a function exactly 2 levels below the top of the stack.
+        """
+        # HELP: any errors other than ValueError from _getframe? If so please submit an issue
         try:
-            frames = inspect.getouterframes(curframe, context=self._frame_context_length)
-        except IndexError:
-            # NOTICE: we should really catch all conceivable errors here, if you find one please report.
-            # IndexError happens in odd situations such as code called from within jinja templates
+            call_frame: 'FrameType' = sys._getframe(2)
+        except ValueError:
+            # "If [ValueError] is deeper than the call stack, ValueError is raised"
             return self.output_class(
                 filename='<unknown>',
                 lineno=0,
                 frame='',
                 arguments=list(self._args_inspection_failed(args, kwargs)),
-                warning=self._show_warnings and 'error parsing code, IndexError',
+                warning=self._show_warnings and 'error parsing code, call stack too shallow',
             )
-        # BEWARE: this must be called by a method which in turn is called "directly" for the frame to be correct
-        call_frame = frames[2]
 
-        filename = call_frame.filename
+        filename = call_frame.f_code.co_filename
+        function = call_frame.f_code.co_name
         if filename.startswith('/'):
             # make the path relative
+            from pathlib import Path
+
+            cwd = Path('.').resolve()
             try:
-                filename = str(Path(filename).relative_to(CWD))
+                filename = str(Path(filename).relative_to(cwd))
             except ValueError:
                 # happens if filename path is not within CWD
                 pass
 
-        if call_frame.code_context:
-            func_ast, code_lines, lineno, warning = self._parse_code(call_frame, func_regex, filename)
-            if func_ast:
-                arguments = list(self._process_args(func_ast, code_lines, args, kwargs))
-            else:
-                # parsing failed
-                arguments = list(self._args_inspection_failed(args, kwargs))
-        else:
-            lineno = call_frame.lineno
+        lineno = call_frame.f_lineno
+        warning = None
+
+        import inspect
+
+        try:
+            file_lines, _ = inspect.findsource(call_frame)
+        except OSError:
             warning = 'no code context for debug call, code inspection impossible'
             arguments = list(self._args_inspection_failed(args, kwargs))
+        else:
+            try:
+                first_line, last_line = self._statement_range(call_frame, func_name)
+                func_ast, code_lines = self._parse_code(filename, file_lines, first_line, last_line)
+            except IntrospectionError as e:
+                # parsing failed
+                warning = e.args[0]
+                arguments = list(self._args_inspection_failed(args, kwargs))
+            else:
+                arguments = list(self._process_args(func_ast, code_lines, args, kwargs))
 
         return self.output_class(
             filename=filename,
             lineno=lineno,
-            frame=call_frame.function,
+            frame=function,
             arguments=arguments,
             warning=self._show_warnings and warning,
         )
@@ -200,7 +197,23 @@ class Debug:
         for name, value in kwargs.items():
             yield self.output_class.arg_class(value, name=name)
 
-    def _process_args(self, func_ast, code_lines, args, kwargs) -> Generator[DebugArgument, None, None]:  # noqa: C901
+    def _process_args(self, func_ast, code_lines, args, kwargs) -> 'Generator[DebugArgument, None, None]':  # noqa: C901
+        import ast
+
+        complex_nodes = (
+            ast.Call,
+            ast.Attribute,
+            ast.Subscript,
+            ast.IfExp,
+            ast.BoolOp,
+            ast.BinOp,
+            ast.Compare,
+            ast.DictComp,
+            ast.ListComp,
+            ast.SetComp,
+            ast.GeneratorExp,
+        )
+
         arg_offsets = list(self._get_offsets(func_ast))
         for i, arg in enumerate(args):
             try:
@@ -212,7 +225,7 @@ class Debug:
 
             if isinstance(ast_node, ast.Name):
                 yield self.output_class.arg_class(arg, name=ast_node.id)
-            elif isinstance(ast_node, self.complex_nodes):
+            elif isinstance(ast_node, complex_nodes):
                 # TODO replace this hack with astor when it get's round to a new release
                 start_line, start_col = arg_offsets[i]
 
@@ -238,34 +251,31 @@ class Debug:
             yield self.output_class.arg_class(value, name=name, variable=kw_arg_names.get(name))
 
     def _parse_code(
-        self, call_frame, func_regex, filename
-    ) -> Tuple[Optional[ast.AST], Optional[List[str]], int, Optional[str]]:
-        call_lines = []
-        for line in range(call_frame.index, -1, -1):
-            try:
-                new_line = call_frame.code_context[line]
-            except IndexError:  # pragma: no cover
-                return None, None, line, 'error parsing code. line not found'
-            call_lines.append(new_line)
-            if re.search(func_regex, new_line):
-                break
-        call_lines.reverse()
-        lineno = call_frame.lineno - len(call_lines) + 1
+        self, filename: str, file_lines: 'List[str]', first_line: int, last_line: int
+    ) -> 'Tuple[ast.AST, List[str]]':
+        """
+        All we're trying to do here is build an AST of the function call statement. However numerous ugly interfaces,
+        lack on introspection support and changes between python versions make this extremely hard.
+        """
+        from textwrap import dedent
+        import ast
 
-        code = dedent(''.join(call_lines))
+        def get_code(_last_line: int) -> str:
+            lines = file_lines[first_line - 1 : _last_line]
+            return dedent(''.join(ln for ln in lines if ln.strip('\n ') and not ln.lstrip(' ').startswith('#')))
+
+        code = get_code(last_line)
         func_ast = None
-        tail_index = call_frame.index
         try:
             func_ast = self._wrap_parse(code, filename)
         except (SyntaxError, AttributeError) as e1:
-            # if the trailing bracket(s) of the function is/are on a new line eg.
+            # if the trailing bracket(s) of the function is/are on a new line e.g.:
             # debug(
             #     foo, bar,
             # )
             # inspect ignores it when setting index and we have to add it back
-            for extra in range(2, 6):
-                extra_lines = call_frame.code_context[tail_index + 1 : tail_index + extra]
-                code = dedent(''.join(call_lines + extra_lines))
+            for extra in range(1, 6):
+                code = get_code(last_line + extra)
                 try:
                     func_ast = self._wrap_parse(code, filename)
                 except (SyntaxError, AttributeError):
@@ -274,27 +284,78 @@ class Debug:
                     break
 
             if not func_ast:
-                return None, None, lineno, 'error parsing code, {0.__class__.__name__}: {0}'.format(e1)
+                raise IntrospectionError('error parsing code, {0.__class__.__name__}: {0}'.format(e1))
 
         if not isinstance(func_ast, ast.Call):
-            return None, None, lineno, 'error parsing code, found {} not Call'.format(func_ast.__class__)
+            raise IntrospectionError('error parsing code, found {0.__class__} not Call'.format(func_ast))
 
         code_lines = [line for line in code.split('\n') if line]
         # this removes the trailing bracket from the lines of code meaning it doesn't appear in the
         # representation of the last argument
         code_lines[-1] = code_lines[-1][:-1]
-        return func_ast, code_lines, lineno, None
+        return func_ast, code_lines
+
+    @staticmethod  # noqa: C901
+    def _statement_range(call_frame: 'FrameType', func_name: str) -> 'Tuple[int, int]':  # noqa: C901
+        """
+        Try to find the start and end of a frame statement.
+        """
+        import dis
+
+        # dis.disassemble(call_frame.f_code, call_frame.f_lasti)
+        # pprint([i for i in dis.get_instructions(call_frame.f_code)])
+
+        instructions = iter(dis.get_instructions(call_frame.f_code))
+        first_line = None
+        last_line = None
+
+        for instr in instructions:  # pragma: no branch
+            if instr.starts_line:
+                if instr.opname in {'LOAD_GLOBAL', 'LOAD_NAME'} and instr.argval == func_name:
+                    first_line = instr.starts_line
+                elif instr.opname == 'LOAD_GLOBAL' and instr.argval == 'debug':
+                    if next(instructions).argval == func_name:
+                        first_line = instr.starts_line
+            if instr.offset == call_frame.f_lasti:
+                break
+
+        if first_line is None:
+            raise IntrospectionError('error parsing code, unable to find "{}" function statement'.format(func_name))
+
+        for instr in instructions:
+            if instr.starts_line:
+                last_line = instr.starts_line - 1
+                break
+
+        if last_line is None:
+            if sys.version_info >= (3, 8):
+                # absolutely no reliable way of getting the last line of the statement, complete hack is to
+                # get the last line of the last statement of the whole code block and go from there
+                # this assumes (perhaps wrongly?) that the reason we couldn't find last_line is that the statement
+                # in question was the last of the block
+                last_line = max(i.starts_line for i in dis.get_instructions(call_frame.f_code) if i.starts_line)
+            else:
+                # in older version of python f_lineno is the end of the statement, not the beginning
+                # so this is a reasonable guess
+                last_line = call_frame.f_lineno
+
+        return first_line, last_line
 
     @staticmethod
-    def _wrap_parse(code, filename):
+    def _wrap_parse(code: str, filename: str) -> 'ast.Call':
         """
         async wrapper is required to avoid await calls raising a SyntaxError
         """
+        import ast
+        from textwrap import indent
+
         code = 'async def wrapper():\n' + indent(code, ' ')
         return ast.parse(code, filename=filename).body[0].body[0].value
 
     @staticmethod
     def _get_offsets(func_ast):
+        import ast
+
         for arg in func_ast.args:
             start_line, start_col = arg.lineno - 2, arg.col_offset - 1
 

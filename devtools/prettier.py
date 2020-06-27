@@ -1,28 +1,14 @@
 import io
 import os
-import textwrap
 from collections import OrderedDict
 from collections.abc import Generator
-from typing import Any, Union
-from unittest.mock import _Call as MockCall
 
-from .ansi import isatty
-
-try:
-    import pygments
-    from pygments.lexers import PythonLexer
-    from pygments.formatters import Terminal256Formatter
-except ImportError:  # pragma: no cover
-    pyg_lexer = pyg_formatter = None
-else:
-    pyg_lexer, pyg_formatter = PythonLexer(), Terminal256Formatter(style='vim')
-
-try:
-    from multidict import MultiDict
-except ImportError:
-    MultiDict = None
+from .utils import env_true, isatty
 
 __all__ = 'PrettyFormat', 'pformat', 'pprint'
+MYPY = False
+if MYPY:
+    from typing import Any, Union
 
 PARENTHESES_LOOKUP = [
     (list, '[', ']'),
@@ -34,20 +20,23 @@ MISSING = object()
 PRETTY_KEY = '__prettier_formatted_value__'
 
 
-def env_true(var_name, alt=None):
-    env = os.getenv(var_name, None)
-    if env:
-        return env.upper() in {'1', 'TRUE'}
-    else:
-        return alt
-
-
 def fmt(v):
     return {PRETTY_KEY: v}
 
 
 class SkipPretty(Exception):
     pass
+
+
+def get_pygments():
+    try:
+        import pygments
+        from pygments.lexers import PythonLexer
+        from pygments.formatters import Terminal256Formatter
+    except ImportError:  # pragma: no cover
+        return None, None, None
+    else:
+        return pygments, PythonLexer(), Terminal256Formatter(style='vim')
 
 
 class PrettyFormat:
@@ -74,19 +63,17 @@ class PrettyFormat:
             (Generator, self._format_generators),
         ]
 
-        if MultiDict:
-            self._type_lookup.append((MultiDict, self._format_dict))
-
-    def __call__(self, value: Any, *, indent: int = 0, indent_first: bool = False, highlight: bool = False):
+    def __call__(self, value: 'Any', *, indent: int = 0, indent_first: bool = False, highlight: bool = False):
         self._stream = io.StringIO()
         self._format(value, indent_current=indent, indent_first=indent_first)
         s = self._stream.getvalue()
-        if highlight and pyg_lexer:
+        pygments, pyg_lexer, pyg_formatter = get_pygments()
+        if highlight and pygments:
             # apparently highlight adds a trailing new line we don't want
             s = pygments.highlight(s, lexer=pyg_lexer, formatter=pyg_formatter).rstrip('\n')
         return s
 
-    def _format(self, value: Any, indent_current: int, indent_first: bool):
+    def _format(self, value: 'Any', indent_current: int, indent_first: bool):
         if indent_first:
             self._stream.write(indent_current * self._c)
 
@@ -95,7 +82,11 @@ class PrettyFormat:
         except AttributeError:
             pass
         else:
-            if hasattr(pretty_func, '__self__') and not isinstance(value, MockCall):
+            # `pretty_func.__class__.__name__ == 'method'` should only be true for bound methods,
+            # `hasattr(pretty_func, '__self__')` is more canonical but weirdly is true for unbound cython functions
+            from unittest.mock import _Call as MockCall
+
+            if pretty_func.__class__.__name__ == 'method' and not isinstance(value, MockCall):
                 try:
                     gen = pretty_func(fmt=fmt, skip_exc=SkipPretty)
                     self._render_pretty(gen, indent_current)
@@ -113,6 +104,14 @@ class PrettyFormat:
                 if isinstance(value, t):
                     func(value, value_repr, indent_current, indent_new)
                     return
+
+            # very blunt check for things that look like dictionaries but do not necessarily inherit from Mapping
+            # e.g. asyncpg Records
+            # HELP: are there any other checks we should include here?
+            if hasattr(value, '__getitem__') and hasattr(value, 'items') and callable(value.items):
+                self._format_dict(value, value_repr, indent_current, indent_new)
+                return
+
             self._format_raw(value, value_repr, indent_current, indent_new)
 
     def _render_pretty(self, gen, indent: int):
@@ -135,13 +134,13 @@ class PrettyFormat:
                     # shouldn't happen but will
                     self._stream.write(repr(v))
 
-    def _format_dict(self, value: dict, value_repr: str, indent_current: int, indent_new: int):
+    def _format_dict(self, value: 'Any', value_repr: str, indent_current: int, indent_new: int):
         open_, before_, split_, after_, close_ = '{\n', indent_new * self._c, ': ', ',\n', '}'
         if isinstance(value, OrderedDict):
             open_, split_, after_, close_ = 'OrderedDict([\n', ', ', '),\n', '])'
             before_ += '('
-        elif MultiDict and isinstance(value, MultiDict):
-            open_, close_ = '<{}(\n'.format(value.__class__.__name__), ')>'
+        elif not isinstance(value, dict):
+            open_, close_ = '<{}({{\n'.format(value.__class__.__name__), '})>'
 
         self._stream.write(open_)
         for k, v in value.items():
@@ -152,7 +151,9 @@ class PrettyFormat:
             self._stream.write(after_)
         self._stream.write(indent_current * self._c + close_)
 
-    def _format_list_like(self, value: Union[list, tuple, set], value_repr: str, indent_current: int, indent_new: int):
+    def _format_list_like(
+        self, value: 'Union[list, tuple, set]', value_repr: str, indent_current: int, indent_new: int
+    ):
         open_, close_ = '(', ')'
         for t, *oc in PARENTHESES_LOOKUP:
             if isinstance(value, t):
@@ -182,7 +183,7 @@ class PrettyFormat:
             # normal tuples are just like other similar iterables
             return self._format_list_like(value, value_repr, indent_current, indent_new)
 
-    def _format_str_bytes(self, value: Union[str, bytes], value_repr: str, indent_current: int, indent_new: int):
+    def _format_str_bytes(self, value: 'Union[str, bytes]', value_repr: str, indent_current: int, indent_new: int):
         if self._repr_strings:
             self._stream.write(value_repr)
         else:
@@ -215,14 +216,17 @@ class PrettyFormat:
                 self._stream.write(',\n')
             self._stream.write(indent_current * self._c + ')')
 
-    def _format_raw(self, value: Any, value_repr: str, indent_current: int, indent_new: int):
+    def _format_raw(self, value: 'Any', value_repr: str, indent_current: int, indent_new: int):
         lines = value_repr.splitlines(True)
         if len(lines) > 1 or (len(value_repr) + indent_current) >= self._width:
             self._stream.write('(\n')
             wrap_at = self._width - indent_new
             prefix = indent_new * self._c
+
+            from textwrap import wrap
+
             for line in lines:
-                sub_lines = textwrap.wrap(line, wrap_at)
+                sub_lines = wrap(line, wrap_at)
                 for sline in sub_lines:
                     self._stream.write(prefix + sline + '\n')
             self._stream.write(indent_current * self._c + ')')
