@@ -257,8 +257,8 @@ class Debug:
         All we're trying to do here is build an AST of the function call statement. However numerous ugly interfaces,
         lack on introspection support and changes between python versions make this extremely hard.
         """
-        from textwrap import dedent
         import ast
+        from textwrap import dedent
 
         def get_code(_last_line: int) -> str:
             lines = file_lines[first_line - 1 : _last_line]
@@ -310,12 +310,12 @@ class Debug:
         last_line = None
 
         for instr in instructions:  # pragma: no branch
-            if instr.starts_line:
-                if instr.opname in {'LOAD_GLOBAL', 'LOAD_NAME'} and instr.argval == func_name:
-                    first_line = instr.starts_line
-                elif instr.opname == 'LOAD_GLOBAL' and instr.argval == 'debug':
-                    if next(instructions).argval == func_name:
-                        first_line = instr.starts_line
+            if (
+                instr.starts_line
+                and instr.opname in {'LOAD_GLOBAL', 'LOAD_NAME'}
+                and (instr.argval == func_name or (instr.argval == 'debug' and next(instructions).argval == func_name))
+            ):
+                first_line = instr.starts_line
             if instr.offset == call_frame.f_lasti:
                 break
 

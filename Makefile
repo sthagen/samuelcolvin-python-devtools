@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-isort = isort -rc devtools tests
+isort = isort devtools tests
 black = black -S -l 120 --target-version py37 devtools
 
 .PHONY: install
@@ -16,8 +16,8 @@ format:
 .PHONY: lint
 lint:
 	flake8 devtools/ tests/
-	$(isort) --check-only -df
-	$(black) --check
+	$(isort) --check-only --df
+	$(black) --check --diff
 
 .PHONY: check-dist
 check-dist:
@@ -55,11 +55,17 @@ clean:
 
 .PHONY: docs
 docs:
-	make -C docs html
+	flake8 --max-line-length=80 docs/examples/
+	python docs/build/main.py
+	mkdocs build
 
-.PHONY: publish
-publish: docs
-	cd docs/_build/ && cp -r html site && zip -r site.zip site
-	@curl -i -H "Content-Type: application/zip" -H "Authorization: Bearer ${NETLIFY}" \
-	      --data-binary "@docs/_build/site.zip" https://api.netlify.com/api/v1/sites/python-devtools.netlify.com/deploys
-	@echo " "
+.PHONY: docs-serve
+docs-serve:
+	python docs/build/main.py
+	mkdocs serve
+
+.PHONY: publish-docs
+publish-docs: docs
+	zip -r site.zip site
+	@curl -H "Content-Type: application/zip" -H "Authorization: Bearer ${NETLIFY}" \
+	      --data-binary "@site.zip" https://api.netlify.com/api/v1/sites/python-devtools.netlify.com/deploys
