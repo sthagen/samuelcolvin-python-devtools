@@ -1,7 +1,16 @@
 import os
 import sys
 
-__all__ = 'isatty', 'env_true', 'env_bool', 'use_highlight', 'is_literal', 'LaxMapping', 'DataClassType'
+__all__ = (
+    'isatty',
+    'env_true',
+    'env_bool',
+    'use_highlight',
+    'is_literal',
+    'LaxMapping',
+    'DataClassType',
+    'SQLAlchemyClassType',
+)
 
 MYPY = False
 if MYPY:
@@ -134,4 +143,18 @@ class MetaDataClassType(type):
 
 
 class DataClassType(metaclass=MetaDataClassType):
+    pass
+
+
+class MetaSQLAlchemyClassType(type):
+    def __instancecheck__(self, instance: 'Any') -> bool:
+        try:
+            from sqlalchemy.ext.declarative import DeclarativeMeta
+        except ImportError:
+            return False
+        else:
+            return isinstance(instance.__class__, DeclarativeMeta)
+
+
+class SQLAlchemyClassType(metaclass=MetaSQLAlchemyClassType):
     pass
