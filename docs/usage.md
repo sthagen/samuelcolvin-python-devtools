@@ -9,7 +9,7 @@ and readable way to print stuff during development. (If you know why this is, I'
 {!examples/example.py!}
 ```
 
-{!examples/example.html!}
+{{ example_html(examples/example.py) }}
 
 `debug` is like `print` after a good night's sleep and lots of coffee:
 
@@ -24,7 +24,7 @@ A more complex example of `debug` shows more of what it can do.
 {!examples/complex.py!}
 ```
 
-{!examples/complex.html!}
+{{ example_html(examples/complex.py) }}
 
 ### Returning the arguments
 
@@ -40,7 +40,7 @@ The returned arguments work as follows:
 {!examples/return_args.py!}
 ```
 
-{!examples/return_args.html!}
+{{ example_html(examples/return_args.py) }}
 
 ## Other debug tools
 
@@ -54,7 +54,7 @@ The debug namespace includes a number of other useful functions:
 {!examples/other.py!}
 ```
 
-{!examples/other.html!}
+{{ example_html(examples/other.py) }}
 
 ### Prettier print
 
@@ -69,10 +69,10 @@ in `debug()`, but it can also be used directly:
 {!examples/prettier.py!}
 ```
 
-{!examples/prettier.html!}
+{{ example_html(examples/prettier.py) }}
 
 For more details on prettier printing, see
-[`prettier.py`](https://github.com/samuelcolvin/python-devtools/blob/master/devtools/prettier.py).
+[`prettier.py`](https://github.com/samuelcolvin/python-devtools/blob/main/devtools/prettier.py).
 
 ## ANSI terminal colours
 
@@ -81,21 +81,45 @@ For more details on prettier printing, see
 ```
 
 For more details on ansi colours, see
-[ansi.py](https://github.com/samuelcolvin/python-devtools/blob/master/devtools/ansi.py).
+[ansi.py](https://github.com/samuelcolvin/python-devtools/blob/main/devtools/ansi.py).
 
-## Usage without import
+## Usage without Import
 
 We all know the annoyance of running code only to discover a missing import, this can be particularly
 frustrating when the function you're using isn't used except during development.
 
-You can setup your environment to make `debug` available at all times by editing `sitecustomize.py`,
-with ubuntu and python3.6 this file can be found at `/usr/lib/python3.6/sitecustomize.py` but you might
-need to look elsewhere depending on your OS/python version.
+devtool's `debug` function can be used without import if you add `debug` to `__builtins__`
+in `sitecustomize.py`.
 
-Add the following to `sitecustomize.py`
+Two ways to do this:
+
+### Automatic install
+
+!!! warning
+    This is experimental, please [create an issue](https://github.com/samuelcolvin/python-devtools/issues) 
+    if you encounter any problems.
+
+To install `debug` into `__builtins__` automatically, run:
+
+```bash
+python -m devtools install
+```
+
+This command won't write to any files, but it should print a command for you to run to add/edit `sitecustomize.py`.
+
+### Manual install
+
+To manually add `debug` to `__builtins__`, add the following to `sitecustomize.py` or any code
+which is always imported.
 
 ```py
-{!examples/sitecustomize.py!}
+# add devtools `debug` function to builtins
+try:
+    from devtools import debug
+except ImportError:
+    pass
+else:
+    __builtins__['debug'] = debug
 ```
 
 The `ImportError` exception is important since you'll want python to run fine even if *devtools* isn't installed.

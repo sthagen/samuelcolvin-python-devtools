@@ -1,10 +1,10 @@
 .DEFAULT_GOAL := all
-isort = isort devtools tests
-black = black -S -l 120 --target-version py37 devtools
+isort = isort devtools tests docs/plugins.py
+black = black -S -l 120 --target-version py37 devtools docs/plugins.py
 
 .PHONY: install
 install:
-	python -m pip install -U setuptools pip wheel twine
+	python -m pip install -U setuptools pip wheel twine build
 	pip install -U -r requirements.txt
 	pip install -e .
 
@@ -15,17 +15,18 @@ format:
 
 .PHONY: lint
 lint:
-	flake8 devtools/ tests/
+	flake8 --max-complexity 10 --max-line-length 120 --ignore E203,W503 devtools tests docs/plugins.py
 	$(isort) --check-only --df
 	$(black) --check --diff
+	mypy devtools
 
 .PHONY: test
 test:
-	pytest --cov=devtools --cov-fail-under 0
+	coverage run -m pytest
 
 .PHONY: testcov
 testcov:
-	pytest --cov=devtools --cov-fail-under 0
+	coverage run -m pytest
 	@echo "building coverage html"
 	@coverage html
 
@@ -50,12 +51,10 @@ clean:
 .PHONY: docs
 docs:
 	flake8 --max-line-length=80 docs/examples/
-	python docs/build/main.py
 	mkdocs build
 
 .PHONY: docs-serve
 docs-serve:
-	python docs/build/main.py
 	mkdocs serve
 
 .PHONY: publish-docs
