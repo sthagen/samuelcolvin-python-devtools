@@ -1,3 +1,4 @@
+import ast
 import io
 import os
 from collections import OrderedDict
@@ -13,9 +14,9 @@ except ImportError:
     cache = lru_cache()
 
 try:
-    from sqlalchemy import inspect as sa_inspect  # type: ignore
+    from sqlalchemy import inspect as sa_inspect
 except ImportError:
-    sa_inspect = None
+    sa_inspect = None  # type: ignore[assignment]
 
 __all__ = 'PrettyFormat', 'pformat', 'pprint'
 MYPY = False
@@ -43,9 +44,9 @@ class SkipPretty(Exception):
 @cache
 def get_pygments() -> 'Tuple[Any, Any, Any]':
     try:
-        import pygments  # type: ignore
-        from pygments.formatters import Terminal256Formatter  # type: ignore
-        from pygments.lexers import PythonLexer  # type: ignore
+        import pygments
+        from pygments.formatters import Terminal256Formatter
+        from pygments.lexers import PythonLexer
     except ImportError:  # pragma: no cover
         return None, None, None
     else:
@@ -80,6 +81,7 @@ class PrettyFormat:
             (bytearray, self._format_bytearray),
             (generator_types, self._format_generator),
             # put these last as the check can be slow
+            (ast.AST, self._format_ast_expression),
             (LaxMapping, self._format_dict),
             (DataClassType, self._format_dataclass),
             (SQLAlchemyClassType, self._format_sqlalchemy_class),
@@ -240,6 +242,17 @@ class PrettyFormat:
         lines = self._wrap_lines(bytes(value), indent_new)
         self._str_lines(lines, indent_current, indent_new)
 
+    def _format_ast_expression(self, value: ast.AST, _: str, indent_current: int, indent_new: int) -> None:
+        try:
+            s = ast.dump(value, indent=self._indent_step)
+        except TypeError:
+            # no indent before 3.9
+            s = ast.dump(value)
+        lines = s.splitlines(True)
+        self._stream.write(lines[0])
+        for line in lines[1:]:
+            self._stream.write(indent_current * self._c + line)
+
     def _format_dataclass(self, value: 'Any', _: str, indent_current: int, indent_new: int) -> None:
         self._format_fields(value, value.__dict__.items(), indent_current, indent_new)
 
@@ -251,7 +264,7 @@ class PrettyFormat:
             deferred = set()
 
         fields = [
-            (field, getattr(value, field) if field not in deferred else "<deferred>")
+            (field, getattr(value, field) if field not in deferred else '<deferred>')
             for field in dir(value)
             if not (field.startswith('_') or field in ['metadata', 'registry'])
         ]

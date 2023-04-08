@@ -1,0 +1,9 @@
+ansi2html
+mkdocs
+mkdocs-exclude
+mkdocs-material
+mkdocs-simple-hooks
+markdown-include
+pygments
+ruff
+numpy

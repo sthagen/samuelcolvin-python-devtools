@@ -1,0 +1,6 @@
+black
+mypy
+ruff
+# required so mypy can find stubs
+sqlalchemy
+pytest
